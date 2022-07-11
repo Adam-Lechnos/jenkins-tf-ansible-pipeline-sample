@@ -1,0 +1,62 @@
+
+// pipeline properties (parameters & project-based security) START
+
+
+properties([[$class: 'JiraProjectProperty'], authorizationMatrix(inheritanceStrategy: inheritingGlobal(), permissions: []), parameters([string(description: 'account_name', name: 'account_name'), string(description: 'aws_region', name: 'aws_region'), string('region_group'), string(description: 'env_group', name: 'env_group'), string(description: 'git_org', name: 'git_org'), string(description: 'git_repo_url', name: 'git_repo_url'), string(description: 'git_release', name: 'git_release'), string(description: 'build_type', name: 'build_type'), string(description: 'json_selector', name: 'json_selector'), string('devops_release'), string(description: 'regression_tests', name: 'regression_tests')])])
+
+
+// pipeline properties (parameters & project-based security) STOP
+
+
+def username
+def specificCause = currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause')
+username = specificCause.userId[0]
+
+
+pipeline {
+//    agent { label 'master' }
+    agent any
+    stages {
+        stage('Build') {
+            steps {
+                script {
+                    print "grep ${username} /var/lib/jenkins/git/cloud-market-data/jenkins_tools/reference_groups/${account_name}.txt"
+                    sh label: 'check user account access', script: 'set +x; grep '+username+' /var/lib/jenkins/git/cloud-market-data/jenkins_tools/reference_groups/${account_name}.txt'
+                    iac_json_devops_release = sh (label: 'get devops release', returnStdout: true, script: '/bin/bash /var/lib/jenkins/git/cloud-market-data/jenkins_tools/iac_release_parser/iac_release_parser.sh ${git_repo_url} ${git_release} no').trim()
+                    
+                    //enforce devops_release decision based on iac.json if specified
+                    if (iac_json_devops_release) { 
+                           devops_release=iac_json_devops_release
+                    }
+
+                    // //enforce regression tests for all build accounts
+                    // if (params.account_name =~ /content.qt-build./){
+                    //     regression_tests = "Yes" 
+                    //     print "============================================\nEnforcing regression tests for build account\n============================================"
+                    // }
+
+                    //if (!devops_release)  {
+                    //   devops_release = sh (label: 'get devops release', returnStdout: true, script: '/bin/bash /var/lib/jenkins/git/cloud-market-data/jenkins_tools/iac_release_parser/iac_release_parser.sh ${git_repo_url} ${git_release} no').trim()
+                    //}   
+                    echo "================\nBuild Parameters\n================\nUsername: ${username}\nAccount Name: ${account_name}\nAWS Region: ${aws_region}\nDevops Release: ${devops_release}\nBuild Type: ${build_type}\nGit Org: ${git_org}\nGit Repo URL: ${git_repo_url}\nGit Release: ${git_release}\nJSON Selector: ${json_selector}\nRegression Tests: ${regression_tests}\n"
+                    build job: "Quotes_Controller", propagate: true, wait: true, 
+                    parameters: [
+                     [$class: 'StringParameterValue', name: 'account_name', value: String.valueOf(account_name)],
+                     [$class: 'StringParameterValue', name: 'aws_region', value: String.valueOf(aws_region)],
+                     [$class: 'StringParameterValue', name: 'build_type', value: String.valueOf(build_type)],
+                     [$class: 'StringParameterValue', name: 'git_org', value: String.valueOf(git_org)],
+                     [$class: 'StringParameterValue', name: 'git_release', value: String.valueOf(git_release)],
+                     [$class: 'StringParameterValue', name: 'git_repo_url', value: String.valueOf(git_repo_url)],
+                     [$class: 'StringParameterValue', name: 'devops_release', value: String.valueOf(devops_release)],
+                     [$class: 'StringParameterValue', name: 'regression_tests', value: String.valueOf(regression_tests)],
+                     [$class: 'StringParameterValue', name: 'user_name', value: String.valueOf(username)],
+                     [$class: 'StringParameterValue', name: 'json_selector', value: String.valueOf(json_selector)],
+                     [$class: 'StringParameterValue', name: 'cli_access', value: "Yes"]
+                                ]
+
+                }
+            }
+        }
+
+    }
+}

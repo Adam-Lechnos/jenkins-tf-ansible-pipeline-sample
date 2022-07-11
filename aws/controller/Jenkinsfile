@@ -1,0 +1,1078 @@
+import java.util.regex.*
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurperClassic
+import groovy.json.*
+import static groovy.json.JsonParserType.LAX as RELAX
+
+def username
+def cliaccess
+def specificCause = currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause')
+
+//adam_test branches
+//def terraformJobsMap = ['scale_set_with_load_balancer': 'test_downstream_deploy_destroy_bcm_1780', 'scale_set_with_application_load_balancer': 'test_downstream_deploy_destroy_bcm_1780', 'scale_set_without_load_balancer': 'test_downstream_deploy_destroy_bcm_1780', 'scale_set_with_shared_load_balancer': 'test_downstream_deploy_destroy_bcm_1780', 'shared_load_balancer': 'test_downstream_deploy_destroy_bcm_1780', 'virtual_machine': 'test_downstream_deploy_destroy_bcm_1780', 'security_group': 'test_downstream_deploy_destroy_bcm_1780']
+
+//mroman_test branch
+//def terraformJobsMap = ['scale_set_with_load_balancer': 'mroman_test_quotes_downstream_deploy_destroy', 'scale_set_with_application_load_balancer': 'mroman_test_quotes_downstream_deploy_destroy', 'scale_set_without_load_balancer': 'mroman_test_quotes_downstream_deploy_destroy', 'scale_set_with_shared_load_balancer': 'mroman_test_quotes_downstream_deploy_destroy', 'shared_load_balancer': 'mroman_test_quotes_downstream_deploy_destroy', 'virtual_machine': 'mroman_test_quotes_downstream_deploy_destroy', 'security_group': 'mroman_test_quotes_downstream_deploy_destroy']
+
+//master branch
+def terraformJobsMap = ['scale_set_with_load_balancer': 'quotes_downstream_deploy_destroy', 'scale_set_with_application_load_balancer': 'quotes_downstream_deploy_destroy', 'scale_set_without_load_balancer': 'quotes_downstream_deploy_destroy', 'scale_set_with_shared_load_balancer': 'quotes_downstream_deploy_destroy', 'shared_load_balancer': 'quotes_downstream_deploy_destroy', 'virtual_machine': 'quotes_downstream_deploy_destroy', 'security_group': 'quotes_downstream_deploy_destroy']
+
+pipeline {
+  agent { label 'jenkins_managed_linux' }
+  environment {
+    PATH = "./../../:$PATH"
+    GIT_ACCESS_TOKEN = credentials('devops_github_access_token')
+    GIT_ACCESS_TOKEN_SCM = credentials('scm_ssh_devops_github_access_token')
+  }
+      
+  stages {
+    stage ('Binary Init') {
+      steps {
+       script {
+           print "========================\nDevops Release: " + devops_release + "\n========================"
+           terraformVer = sh(label: 'cURL Binaries Map - Terraform Version', script: 'set +x; curl -s -H "Authorization: token $GIT_ACCESS_TOKEN" https://raw.github.factset.com/market-data-cloud/account_config/master/pipeline_files/binary_versions | jq -r \'.base_binaries | to_entries | map(select(.key | match(\"terraform\"))) | map(.value) | .[]\'', returnStdout: true).trim()
+           terragruntVer = sh(label: 'cURL Binaries Map - Terragrunt Version', script: 'set +x; curl -s -H "Authorization: token $GIT_ACCESS_TOKEN" https://raw.github.factset.com/market-data-cloud/account_config/master/pipeline_files/binary_versions | jq -r \'.base_binaries | to_entries | map(select(.key | match(\"terragrunt\"))) | map(.value) | .[]\'', returnStdout: true).trim()        
+           sh label: 'cURL binary-init script', script: 'set +x; curl -s -H "Authorization: token $GIT_ACCESS_TOKEN" https://raw.github.factset.com/market-data-cloud/devops_tools/master/binary-init/binary-init.sh --output binary-init.sh; chmod +x binary-init.sh'
+           sh label: 'Executing binary-init script', script: "./binary-init.sh ${terraformVer} ${terragruntVer}"
+       }
+      }
+    }
+    
+    stage ('Aqcuire Access & Set State') {
+      steps {
+       script {     
+           username = specificCause.userId[0]
+           if ( !username) { username = user_name }
+
+           print "grep ${username} /var/lib/jenkins/git/cloud-market-data/jenkins_tools/reference_groups/${account_name}.txt"
+           sh label: 'check user account access', script: 'set +x; grep '+username+' /var/lib/jenkins/git/cloud-market-data/jenkins_tools/reference_groups/${account_name}.txt'
+
+           mainRepoName = sh(label: 'Extract repo name', returnStdout: true, script: 'set +x; echo '+params.git_repo_url+' | xargs -I\'{}\' basename {} .git').trim()
+           mainRepoNameAbbr = sh(label: 'Abbreviate Repo Name', returnStdout: true, script: 'set +x; echo '+params.git_repo_url+' | xargs -I\'{}\' basename {} .git | cut -d. -f1').trim()
+           role_account_env = sh(label: 'Extract environment', returnStdout: true, script: 'set +x; echo '+params.account_name+' | cut -d. -f3').trim()
+
+           role_account = sh(label: 'cURL AWS Account Map - role account', script: 'set +x; curl -s -H "Authorization: token $GIT_ACCESS_TOKEN" https://raw.github.factset.com/market-data-cloud/account_config/master/pipeline_files/aws_reference_maps | jq -r \'.account_map | to_entries | map(select(.key | match(\"'+params.account_name+'\"))) | map(.value) | .[]\'', returnStdout: true).trim()
+
+           echo "=======================\nAWS Account\n\n${params.account_name}\n${role_account}\n======================="
+           role = "arn:aws:iam::$role_account:role/jenkins_infra_builder"
+
+           role_account_abbr = sh(label: 'cURL AWS Account Map - role_account_abbr', script: 'set +x; curl -s -H "Authorization: token $GIT_ACCESS_TOKEN" https://raw.github.factset.com/market-data-cloud/account_config/master/pipeline_files/aws_reference_maps | jq -r \'.account_abbr_map | to_entries | map(select(.key | match(\"'+params.account_name+'\"))) | map(.value) | .[]\'', returnStdout: true).trim()
+
+           aws_region_abbr = sh(label: 'cURL AWS Region Map - aws_region_abbr', script: 'set +x; curl -s -H "Authorization: token $GIT_ACCESS_TOKEN" https://raw.github.factset.com/market-data-cloud/account_config/master/pipeline_files/aws_reference_maps | jq -r \'.region_abbr_map | to_entries | map(select(.key | match(\"'+aws_region+'\"))) | map(.value) | .[]\'', returnStdout: true).trim()
+
+          pgMap = sh(label: "cURL Placement Group Map", script: 'set +x; curl -s -H "Authorization: token $GIT_ACCESS_TOKEN" https://raw.github.factset.com/market-data-cloud/account_config/master/pipeline_files/ppgTranslator | jq -c \'."'+aws_region+'"\'', returnStdout: true).trim()
+          echo "Placement Group selected: ${pgMap}"
+
+          param_workspace_name = "CTRL-$mainRepoNameAbbr-$role_account_abbr-$aws_region_abbr"
+
+           role_account_abbr = role_account_abbr.toUpperCase()
+           aws_region_abbr = aws_region_abbr.toUpperCase()
+           build_type_upper = build_type.toUpperCase()
+           //mainRepoNameAbbr = mainRepoNameAbbr.replaceAll("_","-")
+
+           if (params.cli_access){
+             cliaccess = "Yes"
+           } else {
+             cliaccess = "No"
+           }
+
+           def displayBuild = "$BUILD_NUMBER :: $role_account_abbr :: $aws_region_abbr :: $build_type_upper :: $username"
+           def displayDesc = "Image: $mainRepoNameAbbr, Version: $params.git_release, Account: $role_account_abbr, Region: $aws_region, Build Type: $build_type, Username: $username, Regression Tests: $params.regression_tests, Build# $BUILD_NUMBER, CLI Access: $cliaccess<br>JSON Selector: $json_selector"
+
+           currentBuild.displayName = displayBuild
+           currentBuild.description = displayDesc
+
+           if (json_selector.size() == 0) {
+              currentBuild.description = displayDesc.replace("JSON Selector:", "JSON Selector: All")
+            }
+
+           admin_list = sh(label: 'cURL DevOps Valid Admins', script: 'set +x; curl -s -H "Authorization: token $GIT_ACCESS_TOKEN" https://raw.github.factset.com/market-data-cloud/account_config/master/pipeline_files/admins.json | jq -r \'.devops | join(\",\")\'', returnStdout: true).trim()
+           adminList = admin_list.split(',') as List
+       }
+      }
+    }
+            
+    stage('Parallel Downstream Infra Changes >') {
+      steps {
+        withAWS(roleAccount: "$role_account", role: "$role" ) {
+        script {
+
+          sh label: 'Checking AWS Secret Managet access', script: "aws secretsmanager get-secret-value --secret-id Devops/Github/Pipeline --query SecretString --output text --region $aws_region"
+          
+          def jobs = [:]
+          def job_counter = 1
+          dir('aws/controller/git_repo/'+mainRepoName+'') {          
+            def file_list
+            def splitter
+
+            // check for bake.json inside image repo
+            def bakeExistStatus
+            checkout changelog: false, poll: false, scm: [$class: 'GitSCM', branches: [[name: '*/master']], doGenerateSubmoduleConfigurations: false, extensions: [], gitTool: 'git-default', submoduleCfg: [], userRemoteConfigs: [[url: git_repo_url, credentialsId: 'scm_ssh_devops_github_access_token']]]
+            sh label: 'Check out git tag provided as argument', script: 'git checkout tags/'+git_release+'' 
+            bakeExistStatus = sh label: 'Checking for bake.json', returnStatus: true, script: 'find bake.json'
+
+            //directory parser for json selector
+            dir_list_root = sh(label: 'Check create folder directory structure for JSON Selector', returnStatus: true, script: 'set +x; ls -l create/aws | grep .json')
+            //echo "dir_list_root_test = ${dir_list_root}"
+
+            if ( dir_list_root ) {
+
+            if (json_selector.size() > 0) {
+
+              json_selector.split(",").each { newInput -> 
+              file_list += "create/aws/$aws_region/$role_account_env/$newInput," 
+              }
+
+              file_list = file_list.drop(4)
+              file_list = file_list.reverse().drop(1).reverse()
+              splitter = ","
+
+              echo "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\nJSON Selector is active for folder '$aws_region/$role_account_env/\n+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+
+            } else {
+
+              file_list = sh (label: 'Retrieve file list', script: "set +x; find create/aws/'''$aws_region'''/'''$role_account_env'''/ -maxdepth 1 -type f", returnStdout: true).trim()
+              splitter = "\n"
+
+              echo "Deploying all JSON files for folder '$aws_region/$role_account_env/'"
+
+            }
+
+          } else {
+
+            if ( json_selector.size() > 0 ) {
+            
+              json_selector.split(",").each { newInput ->
+                file_list += "create/aws/$newInput,"
+              }
+
+              file_list = file_list.drop(4)
+              file_list = file_list.reverse().drop(1).reverse()
+              splitter = ","
+
+              echo "+++++++++++++++++++++++++++++++++++++++++++++++++++++\nJSON Selector is active for root 'aws/create/' folder\n+++++++++++++++++++++++++++++++++++++++++++++++++++++"
+
+            } else {
+
+              file_list = sh (label: 'Retrieve file list', script: 'set +x; find create/aws/ -maxdepth 1 -type f', returnStdout: true).trim()
+              splitter = "\n"
+
+              echo "Deploying all JSON files for root 'aws/create' folder"
+
+            }
+          }
+            
+            file_list.split("${splitter}").each { file ->
+              echo "=================================================================\nJSON File = ${file}\n================================================================="
+              output2 =  sh (label: 'pre-process json',script: """ if [ -f /var/lib/jenkins/git/cloud-market-data/jenkins_tools/json_scripts/pre_process.sh ]; then
+								              /var/lib/jenkins/git/cloud-market-data/jenkins_tools/json_scripts/pre_process.sh  ${file}
+                              cat ${file}_processed
+                              mv -v ${file}_processed ${file}
+                          fi """, returnStdout: true).trim()
+              echo "${output2}"              
+              def file_content = readFile file
+              def file_content_json = new JsonSlurperClassic().parseText(file_content)
+              def terraform_tfvars = ""
+              def pgprefixlbStr = ""
+              def workspace_name = ""
+              def admin_workspace_name
+              def build_access_set
+              def sansASG_workspace_name           
+              def volume_type_t
+              def volume_size_s
+              def volume_iops_i
+              def volume_throughput_tp
+              def tgListStr
+              def tgListStrM
+              def tgOutList = ""
+              def tgOutList2 = ""
+              def tgList = ""
+              def tgListfmt = []
+              def tgListfmt2 = ""
+              def sgOutList = ""
+              def sgOutList2 = ""
+              def sgList = ""
+              def sgListfmt = []
+              def sgListfmt2 = ""
+              def valid_admins = adminList
+              def secgroup_restrict = ""
+              def sp_parse = ""
+              def resourceType = ""
+
+              file_content_json.cloud_resources.each { items ->
+                items.each { resource, parameters ->
+                  def parameterList = []
+                  parameters.each { parameter ->
+                    parameter.each { key, value ->
+ 
+                      //JSON Slurper sanitation check for keys and set resourceType for downstream build description.
+                      def entries = ""
+                      def parameterCheck = []
+                      def parameterMapCheck = [:]
+                      parameterMapCheck = key
+                      parameterCheck.add(parameterMapCheck)
+                        
+                      if (resource == "scale_set_with_load_balancer") {
+                        paramCheck_asg_lb(parameterCheck)
+                        resourceType = "(asg-lb)"
+                      } else if (resource == "scale_set_with_application_load_balancer") {
+                        paramCheck_asg_alb(parameterCheck)
+                        resourceType = "(asg-alb)"                         
+                      } else if (resource == "scale_set_without_load_balancer") {
+                        paramCheck_asg(parameterCheck)
+                        resourceType = "(asg)"
+                      } else if (resource == "scale_set_with_shared_load_balancer") {
+                        paramCheck_asg_shd_lb(parameterCheck)
+                        resourceType = "(asg-shd-lb)" 
+                      } else if (resource == "shared_load_balancer") {
+                        paramCheck_shd_lb(parameterCheck)
+                        resourceType = "(shd-lb)" 
+                      } else if (resource == "virtual_machine") {
+                        paramCheck_ec2(parameterCheck)
+                        resourceType = "(ec2)"
+                      } else if (resource == "security_group") {
+                        paramCheck_security_group(parameterCheck)
+                        resourceType = "(security_group)"
+                      } else {
+                            throw new RuntimeException("${resource} is not a valid cloud resource specified within the parsed JSON file")
+                      }
+                      
+                      // if admin build, check user authorization              
+                      if (key == "build_access") {
+                        if (value == "admin") {
+                          echo "+++++++++++++++++++++\nAdmin Build Specified\n+++++++++++++++++++++"
+                          admin_workspace_name = sh(label:'Creating admin workspace name', returnStdout:true, script:'set +x; basename '+file+' | sed \'s/.json//\'').trim()
+                          admin_worksapce_name = "admin-${admin_workspace_name}"
+                          build_access_set = value
+                          if ( username in valid_admins ) {
+                           echo "=========================================\nDevOps Admin ${username} validated\n========================================="
+                        } else { throw new RuntimeException("${username} is not a DevOps Admin") }
+                      } 
+                      }
+                      
+                      //if admin build, set displayname and description accordingly
+                      if (build_access_set != "admin") {
+                        build_access_set = "non-admin"
+
+                      } else {
+
+                        def displayBuildAdmin = "$BUILD_NUMBER :: ADMIN :: $role_account_abbr :: $aws_region_abbr :: $build_type_upper :: $username"
+                        def displayDescAdmin = "Image: $mainRepoNameAbbr, Version: $params.git_release, Account: $role_account_abbr, Region: $aws_region, Build Type: $build_type, Username: $username, Regression Tests: $params.regression_tests, Build# $BUILD_NUMBER, CLI Access: $cliaccess, <b>Admin Build</b>, Build# $BUILD_NUMBER<br>JSON Selector: $json_selector"
+
+                        currentBuild.displayName = displayBuildAdmin
+                        currentBuild.description = displayDescAdmin
+
+                        if (json_selector.size() == 0) {
+                          currentBuild.description = displayDescAdmin.replace("JSON Selector:", "JSON Selector: All")
+
+                        }
+                      }
+
+                    // ppg paramter tranformations            
+                     if (key == "proximity_placement_group_names" || key == "placement_group_names" || key == "proximity_placement_group_name" || key == "placement_group_name") {
+                         pgprefixlbStr = pgPrefixListBldr(value, role_account_env, pgMap)
+                       }                   
+
+                      if ( pgprefixlbStr == "" ) {
+                        pgprefixlbStr = pgPrefixListBldr(role_account_env, pgMap)
+                      }
+                                      
+                      // target group names paramter transformation into terraform list of strings for placement group names, target group names, and security group names
+                      if (key == "target_group_names") {
+
+                            tgListStr = value.toString()
+                            tgListStr = tgListStr - ','
+                            tgListStr = tgListStr - '['
+                            tgListStr = tgListStr - ']'
+                            tgListStr = tgListStr.concat('\"')
+                            tgListStrM = '\"'
+                            tgListStrM = tgListStrM.concat(tgListStr)
+                            tgListStrM = tgListStrM.trim()
+                         
+                            //// create an aggregated and deduplicated list of subnet group names for each provided target group.
+                            tgOutList = sh returnStdout: true, script: '''input='''+tgListStrM+'''
+
+                            tgList=($input)
+
+                            for i in "${tgList[@]}"
+                            do
+                              getLBarn=`aws elbv2 describe-target-groups --names $i --region '''+aws_region+''' | jq -r .TargetGroups[].LoadBalancerArns[]`
+                              getLBsub+=" `aws elbv2 describe-load-balancers --load-balancer-arn $getLBarn --region '''+aws_region+''' | jq -r \'.LoadBalancers | map(.AvailabilityZones[].SubnetId) | join(" ")\'`"
+                            done
+
+                            getLBsubU=`echo $getLBsub | xargs -n1 | sort -u | xargs`
+                            outSubList=`aws ec2 describe-subnets --subnet-ids $getLBsubU --region '''+aws_region+''' | jq -r \'.Subnets[].Tags | map(select(.Key | match("Name"))) | map(.Value) | .[]\' | sed \'s/^/"/;s/$/"/\' | tr "\\n" "," | sed \'s/,$//\' | sed \'s/^/[/;s/$/]/\'`
+                            echo $outSubList'''
+
+                            //// create an aggregated list of security group names from each of the target group's load balancer names.
+                            sgOutList = sh returnStdout: true, script: '''input2='''+tgListStrM+'''
+
+                            sgList=$input2
+                            
+                            getLBarn2+="`aws elbv2 describe-target-groups --names $sgList --region '''+aws_region+''' | jq -r .TargetGroups[].LoadBalancerArns[] | xargs -I "{}" echo "{}" | cut -d/ -f3`"
+                            getLBsubU2+=`echo $getLBarn2 | xargs -n1 | sort -u | sed \'s/^/"/;s/$/"/\'`
+                            outSubList2=`echo $getLBsubU2 '"fds-default-compute-secgroup" "fds-default-additional-secgroup"' | sed \'s/,$//\' | sed \'s/^/[/;s/$/]/\' | sed \'s/" "/", "/g\'`
+                            echo $outSubList2'''
+
+                            //// create list of target group names in which to subscribe
+                            value.each { values ->
+
+                                tgList = values.trim()
+                                tgList = "\"" + tgList + "\""
+                                tgListfmt += tgList
+                                //tgListfmt2 = "[" + tgListfmt + "]"
+                                tgListfmt2 = tgListfmt.toString()
+                              }
+                            }
+
+                      // function calls for paramter transformation into proper terraform data structures
+                      if ( key == "ebs_volume_size" || key == "ebs_size" ) {
+                            volume_size_s = value
+                      } else if ( key  == "ebs_volume_type" || key  == "ebs_type" ) {
+                            volume_type_t = value
+                      } else if ( key  == "ebs_volume_iops" || key  == "ebs_iops"  ) {
+                            volume_iops_i = value
+                      } else if ( key  == "ebs_volume_throughput" || key  == "ebs_throughput"  ) {
+                            volume_throughput_tp = value
+                      } else if ( key == "user_defined_sg_ingress" ) {
+                            def parameterMap0 = [:]
+                            parameterMap0['$class'] = 'StringParameterValue'
+                            parameterMap0['name'] = 'user_defined_sg_ingress'
+                            parameterMap0['value'] = user_defined_sg_ingress ( value )
+                            parameterList.add(parameterMap0)
+                      } else if ( key == "http_tcp_listeners" ) {
+                            def parameterMap1 = [:]
+                            parameterMap1['$class'] = 'StringParameterValue'
+                            parameterMap1['name'] = 'http_tcp_listeners'
+                            parameterMap1['value'] = http_tcp_listeners ( value )
+                            parameterList.add(parameterMap1)
+                      } else if ( key == "rolling_upgrade_policy" ) {
+                            def parameterMap2 = [:]
+                            parameterMap2['$class'] = 'StringParameterValue'
+                            parameterMap2['name'] = 'suspended_processes'
+                            parameterMap2['value'] = rolling_upgrade_policy ( value )
+                            parameterList.add(parameterMap2)
+                      } else if ( key == "target_groups" ) {
+                            def parameterMap3 = [:]
+                            parameterMap3['$class'] = 'StringParameterValue'
+                            parameterMap3['name'] = 'target_groups'
+                            parameterMap3['value'] = target_groups ( value )
+                            parameterList.add(parameterMap3)                                                                         
+                      } else if ( key == "secgroup_restrict" ) {
+                            def parameterMap4 = [:]
+                            parameterMap4['$class'] = 'StringParameterValue'
+                            parameterMap4['name'] = 'secgroup_restrict'
+                            parameterMap4['value'] = secgroup_restrict_create ( value )
+                            parameterList.add(parameterMap4)                                                                         
+                      } else {
+                           // catch all for all other parameters, leave as is without function calls
+                            def parameterMap5 = [:]
+                            parameterMap5['$class'] = 'StringParameterValue'
+                            parameterMap5['name'] = key
+                            parameterMap5['value'] = value
+                            parameterList.add(parameterMap5)
+                      }
+
+                     // set workspace name equal to ASG prefix parameter                
+                      if (key == "scaleset_prefix" || key == "scaleset-prefix") {
+                      workspace_name = value
+                      workspace_name = workspace_name.trim()
+                      //echo "workspace name: ${workspace_name}"
+                      }                
+                    }                  
+                  }
+                        // set workspace name for admin builds or for all builds without a workspace name (scalset_prefix), use the filename excluding '.json'
+                        if (admin_workspace_name?.trim()) {
+                        workspace_name = admin_worksapce_name.trim()
+                        } else if (!workspace_name?.trim()) { sansASG_workspace_name = sh(label:'Creating workspace name from filename', returnStdout:true, script:'set +x; basename '+file+' | sed \'s/.json//\'').trim()
+                                 workspace_name = sansASG_workspace_name
+                        }
+
+                        
+                        // set the placement group var for downstream jobs
+                        if (tgOutList != null && tgOutList != "") {
+                          // only for asg-shd-lb downstream
+                          def parameterMap6 = [:]
+                          parameterMap6['$class'] = 'StringParameterValue'
+                          parameterMap6['name'] = 'pg_prefix'
+                          parameterMap6['value'] = tgOutList
+                          parameterList.add(parameterMap6)
+                        } else {
+                          def parameterMap7 = [:]
+                          parameterMap7['$class'] = 'StringParameterValue'
+                          parameterMap7['name'] = 'pg_prefix'
+                          parameterMap7['value'] = pgprefixlbStr
+                          parameterList.add(parameterMap7)
+                        }
+
+                        // set the security groups for shared load balancers subs
+                        if (sgOutList != null && sgOutList != "") {
+                          //// only for asg-shd-lb downstream
+                          def parameterMap8 = [:]
+                          parameterMap8['$class'] = 'StringParameterValue'
+                          parameterMap8['name'] = 'sg_subs'
+                          parameterMap8['value'] = sgOutList
+                          parameterList.add(parameterMap8)
+                        }
+                        
+                      def vmss_tags = """{
+                          "fds:BusinessUnit"     = "Content Engineering"
+                          "fds:InfraEnvironment" = "${role_account_env}"
+                          "fds:InfraOwner"       = "quotes_engineer@factset.com"
+                          "fds:Provisioner"      = "terraform"
+                          "fds:TaggingVersion"   = "1.0"
+                          }"""
+
+                      // place all set vars into the downstream list var.
+                      def parameterMap9 = [:]
+                      parameterMap9['$class'] = 'StringParameterValue'
+                      parameterMap9['name'] = 'image_name'
+                      parameterMap9['value'] = "${mainRepoName}"
+                      parameterList.add(parameterMap9)
+                   
+                      def parameterMap10 = [:]
+                      parameterMap10['$class'] = 'StringParameterValue'
+                      parameterMap10['name'] = 'accountName'
+                      parameterMap10['value'] = account_name
+                      parameterList.add(parameterMap10)
+
+                      def parameterMap11 = [:]
+                      parameterMap11['$class'] = 'StringParameterValue'
+                      parameterMap11['name'] = 'image_version'
+                      parameterMap11['value'] = git_release
+                      parameterList.add(parameterMap11) 
+
+                      def parameterMap12 = [:]
+                      parameterMap12['$class'] = 'StringParameterValue'
+                      parameterMap12['name'] = 'param_workspace_name'
+                      parameterMap12['value'] = workspace_name
+                      parameterList.add(parameterMap12)
+
+                      def gitrepo = git_repo_url.trim()
+
+                      def parameterMap13 = [:]
+                      parameterMap13['$class'] = 'StringParameterValue'
+                      parameterMap13['name'] = 'git_repo'
+                      parameterMap13['value'] = gitrepo
+                      parameterList.add(parameterMap13)
+
+                      def parameterMap14 = [:]
+                      parameterMap14['$class'] = 'StringParameterValue'
+                      parameterMap14['name'] = 'vmss_tags'
+                      parameterMap14['value'] = vmss_tags
+                      parameterList.add(parameterMap14)
+
+                      def parameterMap15 = [:]
+                      parameterMap15['$class'] = 'StringParameterValue'
+                      parameterMap15['name'] = 'block_device_mappings'
+                      parameterMap15['value'] = ebs_settings ( volume_size_s, volume_type_t, volume_iops_i, volume_throughput_tp )    // volume_type, volume_type, volume_iops used in block_devices_mappings string
+                      parameterList.add(parameterMap15)
+
+                      def parameterMap16 = [:]
+                      parameterMap16['$class'] = 'StringParameterValue'
+                      parameterMap16['name'] = 'build_type'
+                      parameterMap16['value'] = build_type
+                      parameterList.add(parameterMap16)
+
+                      def parameterMap17 = [:]
+                      parameterMap17['$class'] = 'StringParameterValue'
+                      parameterMap17['name'] = 'resource'
+                      parameterMap17['value'] = resource
+                      parameterList.add(parameterMap17)
+
+                      def parameterMap18 = [:]
+                      parameterMap18['$class'] = 'StringParameterValue'
+                      parameterMap18['name'] = 'build_access_set'
+                      parameterMap18['value'] = build_access_set
+                      parameterList.add(parameterMap18)
+
+                      def parameterMap19 = [:]
+                      parameterMap19['$class'] = 'StringParameterValue'
+                      parameterMap19['name'] = 'target_group_sub'
+                      parameterMap19['value'] = tgListfmt2
+                      parameterList.add(parameterMap19)
+
+                      def parameterMap20 = [:]
+                      parameterMap20['$class'] = 'StringParameterValue'
+                      parameterMap20['name'] = 'aws_region'
+                      parameterMap20['value'] = aws_region
+                      parameterList.add(parameterMap20)
+
+                      def parameterMap21 = [:]
+                      parameterMap21['$class'] = 'StringParameterValue'
+                      parameterMap21['name'] = 'lb_name'
+                      parameterMap21['value'] = lb_name_create (workspace_name)
+                      parameterList.add(parameterMap21)
+
+                      def parameterMap22 = [:]
+                      parameterMap22['$class'] = 'StringParameterValue'
+                      parameterMap22['name'] = 'username'
+                      parameterMap22['value'] = username
+                      parameterList.add(parameterMap22)
+
+                      def parameterMap23 = [:]
+                      parameterMap23['$class'] = 'StringParameterValue'
+                      parameterMap23['name'] = 'devops_release'
+                      parameterMap23['value'] = params.devops_release
+                      parameterList.add(parameterMap23)
+
+                      def parameterMap24 = [:]
+                      parameterMap24['$class'] = 'StringParameterValue'
+                      parameterMap24['name'] = 'regression_tests'
+                      parameterMap24['value'] = params.regression_tests
+                      parameterList.add(parameterMap24)
+
+                      // image validation check for specified resources
+                      if ( resource == "scale_set_without_load_balancer" || resource == "scale_set_with_load_balancer" || resource ==  "scale_set_with_shared_load_balancer" ){
+                        existAMI = sh label: 'AWS AMI Check', script: "set +x; aws ec2 describe-images --owners '053821600536' 'self' --filters 'Name=tag:IMAGE_VERSION,Values=${mainRepoName}-${params.git_release}' | grep '${mainRepoName}-${params.git_release}'", returnStatus: true
+                        if (!existAMI){
+                          print("AMI ${mainRepoName}-${params.git_release} exists, proceeding..")
+                        } else {
+                          throw new RuntimeException("An AMI for the specified git repo and git release does not exist within the specified AWS account and region\nAWS Account: ${account_name}\nRegion: ${aws_region}\nGit Repo: ${mainRepoName}\nGit Release: ${params.git_release}")
+                        }
+                      }
+
+                        if (resource == "shared_load_balancer" && build_type == "destroy") {
+
+                        def lb_name = lb_name_create (workspace_name)
+                            lb_name = "shd--" + lb_name
+
+                        def tgHealthSum = sh returnStdout: true, script: '''input='''+lb_name+'''
+
+                          lbName=($input)
+                          
+                          getLBarn=`aws elbv2 describe-load-balancers --names $lbName --region '''+aws_region+''' | jq -r .LoadBalancers[].LoadBalancerArn`
+                          getTGarnList=`aws elbv2 describe-target-groups --load-balancer-arn $getLBarn --region '''+aws_region+''' | jq -r .TargetGroups[].TargetGroupArn`
+
+                          for i in $getTGarnList
+                          do
+                                  targetCount+=`aws elbv2 describe-target-health --target-group-arn $i --region '''+aws_region+''' | jq -r .TargetHealthDescriptions[].Target.Id | wc -l`
+                          done
+
+                          targetAdd=`echo $targetCount | sed 's/./& /g'`
+
+                          sum=0
+                          for i in $targetAdd
+                          do
+                                  sum=$(($sum+$i))
+                          done
+
+                          echo $sum'''
+
+                        echo "Shared Load Balancer Destroy / Target Group Instance Count Sum is: ${tgHealthSum}"
+
+                        tgHealthSum = tgHealthSum.toInteger()
+                        
+                        if (tgHealthSum > 0){
+                          throw new RuntimeException("The Shared Load Balancer resource, ${workspace_name}, cannot be destroyed until all its subscribing ASGs are destroyed.")
+                        }
+
+                      }
+                      
+                      // apply only the filtered list of vars into a new filtered var.
+                      def parameterListClean = parameterList.findAll { it['name'] ==~ '(runtime_data|desired_capacity|max_size|min_size|vm_type|scaleset_prefix|target_groups|target_group_sub|image_name|rolling_upgrade_policy|http_tcp_listeners|user_defined_sg_ingress|health_check_grace_period|proximity_placement_group_name|placement_group_name|pg_prefix|accountName|image_version|param_workspace_name|git_repo|interactive_mode|block_device_mappings|vmss_tags|sg_rules|build_type|build_access|build_access_set|secgroup_restrict|sg_subs|lb_name|alerting_thresholds|aws_region|resource|username|min_healthy_percentage|instance_warmup|heartbeat_timeout|suspended_processes|devops_release|regression_tests)' }
+
+                  def description = workspace_name + " " + resourceType
+                  jobs[description] = {
+                    stage(description) {
+                      //def child_job_link = env.JOB_DISPLAY_URL.replace(env.JOB_BASE_NAME, terraformJobsMap[resource])
+                      //def display_link = sh label: "Child Job Link", script: "set +x; ${child_job_link}", returnStatus: true
+                      //echo "${workspace_name} parsed JSON passed to downstream build"
+                      //echo "${parameterListClean}"
+                      build job: terraformJobsMap[resource], parameters: parameterListClean
+                    }
+                  }
+                }
+              }
+            }
+          }
+          parallel jobs
+        }
+      }
+    }
+  }
+}
+
+  post {
+    always {
+      script {
+         def log = []
+         def build_errors = ""
+         currentBuild.rawBuild.getLog(1000).each { y ->
+            log << y
+         }
+         matches = log.findIndexValues { it.toUpperCase() =~ /(ERROR|FAIL|EXCEPTION)/ }.collect { it as Integer }
+         matches.each { x ->
+            build_errors += "Line " + (x - 2) + " :  " + log[(x - 3)] + "\n"
+            build_errors += "\n"
+            build_errors += "Line " + (x - 1) + " :  " + log[(x - 2)] + "\n"
+            build_errors += "\n"
+            build_errors += "Line " + (x + 0) + " :  " + log[(x - 1)] + "\n"
+            build_errors += "\n"
+            build_errors += "Line " + (x + 1) + " :  " + log[(x + 0)] + "\n"
+            build_errors += "\n"
+            build_errors += "Line " + (x + 2) + " :  " + log[(x + 1)] + "\n"
+            build_errors += "\n"
+            build_errors += "Line " + (x + 3) + " :  " + log[(x + 2)] + "\n"
+            build_errors += "\n"
+            build_errors += "Line " + (x + 4) + " :  " + log[(x + 3)] + "\n"
+            build_errors += "\n"
+            build_errors += "================================================== \n"
+            build_errors += "\n"
+         }
+         if (currentBuild.currentResult == 'FAILURE' || currentBuild.currentResult == 'ABORTED' || currentBuild.currentResult == 'UNSTABLE' ) {
+                emailext attachLog: false,
+                body: "Jenkins build failure - ${account_name} ${mainRepoName} ${git_release} \n\n" +
+                      "See URL: ${env.BUILD_URL}/console  \n\n\n" +
+                      "Build Inputs: \n" +
+                      "############# \n" +
+                      "account_name:  ${account_name} \n" +
+                      "aws_region:  ${aws_region} \n" +
+                      "git_org:  ${git_org} \n" +
+                      "git_repo_url:  ${git_repo_url} \n" +
+                      "git_release:  ${git_release} \n" +
+                      "build_type:  ${build_type} \n" +
+                      "json_selector:  ${json_selector} \n\n\n" +
+                      "Errors from console: \n" +
+                      "################### \n\n" +
+                      "${build_errors}  \n",
+                 to: "${username}@factset.com",
+               from: 'jenkins@factset.com',
+            subject: "Jenkins build failure - ${account_name} ${mainRepoName} ${git_release}"
+          }
+       if (currentBuild.currentResult == 'SUCCESS' && build_type == 'deploy') {
+         withAWS(roleAccount: "$role_account", role: "$role" ) {
+           output3=sh (label: 'prod ami',script: """ if [ -f /var/lib/jenkins/git/cloud-market-data/jenkins_tools/pipeline_scripts/ami_never_expire.sh ]; then
+                      /var/lib/jenkins/git/cloud-market-data/jenkins_tools/pipeline_scripts/ami_never_expire.sh ${account_name} ${git_release} ${git_repo_url} ${build_type} ${aws_region}
+                fi """, returnStdout: true).trim()
+           echo "${output3}"
+         }
+       } 
+       }
+    cleanWs()
+    }
+ }
+}
+
+
+// ##############################################################
+//  FUNCTIONS
+// ##############################################################
+
+def ebs_settings ( s, t, i, tp ) {
+// set volume_size, volume_type, volume_iops.. defaults remaining settings in "block_device_mappings"
+
+   if ( t == null ) {
+        print "\"Volume Type not specified in JSON. Setting Volume Type to gp2\"\n"
+        t = "gp2"
+    }
+    if ( s == null  ) {
+         print "\"Volume Size not specified in JSON. Setting Volume Size to 50GiB\"\n"
+         s = 50
+    }
+
+    def iops
+    def throughput
+    def volume_size
+    def volume_type
+
+    if ( s.toInteger() < 50 ) {
+        volume_size = "50"
+        print "\"Volume Size not specified or not set to at least 50GiB. Setting Volume Size to 50GiB.\"\n"
+    } else {
+        volume_size = s
+    }
+
+    if ( t.toLowerCase() in ["gp3", "io1", "io2"] ) {
+        print "\"Volume Type other than 'gp2' selected. Rolling-Updates back to gp2 will not be available without first destroying this image. Refer to image template for more details: https://github.factset.com/search?q=topic%3Aqt-templates+org%3Amarket-data-cloud+fork%3Atrue\"\n"
+    }
+     
+    if ( t.toLowerCase() in [ "gp2", "gp3", "io1", "io2" ] ) {
+        volume_type = t.toLowerCase()
+    } else {
+        throw new RuntimeException("\"Volume Type must be specified with one the following valid key/values: ebs_volume_type/gp2, gp3, io1, or io2. Refer to image template for more details: https://github.factset.com/search?q=topic%3Aqt-templates+org%3Amarket-data-cloud+fork%3Atrue\"\n")
+    }
+
+    if ( t.toLowerCase() in ["gp2"] ) {
+        if (  tp != null || i != null ) {
+            throw new RuntimeException("\"Volume Type 'gp2' specified with additional unsupported storage parameters, ebs_volume_type and/or ebs_volume_iops. Refer to image template for more details: https://github.factset.com/search?q=topic%3Aqt-templates+org%3Amarket-data-cloud+fork%3Atrue\"\n")
+        }
+    }
+
+    if ( t.toLowerCase() in ["io1", "io2"] ) {
+       if ( i == null || i == "" || i.toInteger() < 100 || i.toInteger() > 64000 ) {
+
+          throw new RuntimeException("\"Volume Type '${t.toLowerCase()}' specified. The following valid key/value range must also be specified: ebs_iops/100-64000. Refer to image template for more details: https://github.factset.com/search?q=topic%3Aqt-templates+org%3Amarket-data-cloud+fork%3Atrue\"\n")
+
+       } else {
+          iops = i.toInteger()
+       }
+       if (  tp != null ) {
+
+          throw new RuntimeException("\"Volume Throuphput setting not supported for Volume Type ${t}\"\n")
+       }  
+    }
+
+
+    if ( t.toLowerCase() in ["gp3"] ) {
+       if ( i == null || i == "" || i.toInteger() < 3000 || i.toInteger() > 16000  ) {
+
+          throw new RuntimeException("\"Volume Type 'gp3' specified. The following valid key/value ranges must also be specified: ebs_iops/3000-16000; ebs_throughput/125-1000. Refer to image template for more details: https://github.factset.com/search?q=topic%3Aqt-templates+org%3Amarket-data-cloud+fork%3Atrue\"\n")
+
+       } else {
+          iops = i.toInteger()
+       }
+       if ( tp == null || tp  == "" || tp.toInteger() < 125 || tp.toInteger() > 1000 ) {
+
+          throw new RuntimeException("\"Volume Type 'gp3' specified. The following valid key/value ranges must also be specified: ebs_iops/3000-16000; ebs_throughput/125-1000. Refer to image template for more details: https://github.factset.com/search?q=topic%3Aqt-templates+org%3Amarket-data-cloud+fork%3Atrue\"\n")
+
+       } else {
+          throughput = tp.toInteger()
+       }
+    }
+
+
+    def device_name = "/dev/sda1"
+    def encrypted = "false"
+    def delete_on_termination = "true"
+
+    if ( volume_type.toLowerCase() in ["gp2"] ) { 
+
+    returnOutput = """[{
+      device_name = "${device_name }"
+      ebs = {
+        volume_size           = "${volume_size}"
+        volume_type           = "${volume_type}"
+        encrypted             = "${encrypted}"
+        delete_on_termination = "${delete_on_termination}"
+      }
+}]"""
+    } else if ( volume_type.toLowerCase() in ["io1", "io2"] )  {
+
+    returnOutput = """[{
+      device_name = "${device_name }"
+      ebs = {
+        volume_size           = "${volume_size}"
+        volume_type           = "${volume_type}"
+        iops		              = "${iops}"
+        encrypted             = "${encrypted}"
+        delete_on_termination = "${delete_on_termination}"
+      }
+}]"""
+    } else if ( volume_type.toLowerCase() in ["gp3"] )  {
+
+    returnOutput = """[{
+      device_name = "${device_name }"
+      ebs = {
+        volume_size           = "${volume_size}"
+        volume_type           = "${volume_type}"
+        iops                  = "${iops}"
+        throughput	          = "${throughput}"
+        encrypted             = "${encrypted}"
+        delete_on_termination = "${delete_on_termination}"
+      }
+}]"""
+
+}
+
+    return returnOutput
+}
+
+
+
+//
+//
+def block_device_mappings (j) {
+// allows any block_device_mappings settings got be set by caller
+def returnOutput = "["
+
+if ( ! j.contains("volume_size")) {
+   throw new RuntimeException('''"block_device_mappings" requires a "volume_size" settings''')
+}
+
+clean_j = j.replaceAll("=",":")
+             .replaceAll("/","FORWARD_SLASH")
+                                               
+def json = new JsonSlurper().setType(RELAX).parseText( clean_j )
+
+json.each { block_dev -> 
+
+if ( returnOutput[-1] == '}' ){
+     returnOutput += ",\n"
+}
+
+def device_name = block_dev.device_name ?: "FORWARD_SLASHdevFORWARD_SLASHsda1"
+def volume_type = block_dev.volume_type ?: "gp2"
+def encrypted = block_dev.encrypted ?: "false"
+def volume_size = block_dev.volume_size ?: "50"
+def delete_on_termination= block_dev.delete_on_termination ?: "true"
+     
+returnOutput += """{
+      device_name = "${device_name.replace("FORWARD_SLASH","/")}"
+      ebs = {
+        volume_size           = "${volume_size}"
+        volume_type           = "${volume_type}"
+        encrypted             = "${encrypted}"
+        delete_on_termination = "${delete_on_termination}"
+      }
+}""" 
+}  // json.each
+
+returnOutput += "]"
+return returnOutput   
+}
+
+
+//
+//
+def user_defined_sg_ingress (j) {
+
+if ( j.contains("{\n") ) {
+   
+   return j
+
+} else {   
+   
+
+def returnOutput = "["
+
+def json = new JsonSlurper().setType(RELAX).parseText( j.replaceAll("=",":"))
+
+json.each { from_to -> 
+
+if ( returnOutput[-1] == '}' ){
+     returnOutput += ",\n"
+}
+returnOutput += """{
+from_port = ${from_to.from_port}
+to_port =  ${from_to.to_port}
+protocol = "${from_to.protocol}"
+self =  "${from_to.self}"
+}""" 
+}  // json.each
+
+returnOutput += "]"
+return returnOutput   
+}
+}
+
+
+//
+//
+def http_tcp_listeners (j) {
+   
+if ( j.contains("{\n") ) {
+   
+   return j
+
+} else {      
+
+def returnOutput = "["
+
+def json = new JsonSlurper().setType(RELAX).parseText( j.replaceAll("=",":"))
+
+json.each { port_proto -> 
+
+if ( returnOutput[-1] == '}' ){
+     returnOutput += ",\n"
+}
+returnOutput += """{
+port = ${port_proto.port}
+protocol = "${port_proto.protocol}"
+}"""  
+}  // json.each
+
+returnOutput += "]"
+return returnOutput   
+}
+}
+
+
+//
+//
+def rolling_upgrade_policy ( j ) {
+  
+  def json = new JsonSlurper().setType(RELAX).parseText( j )
+                                                                                           
+  def returnOutput = """["${json.SuspendProcesses[0]}", "${json.SuspendProcesses[1]}", "${json.SuspendProcesses[2]}", "${json.SuspendProcesses[3]}", "${json.SuspendProcesses[4]}"]"""
+ 
+ return returnOutput 
+}
+
+//
+//
+def target_groups (j) {
+
+if ( j.contains("{\n") ) {
+   
+   return j
+
+} else {      
+
+def returnOutput = "["
+
+def json = new JsonSlurper().setType(RELAX).parseText(j)
+
+json.each { target_group -> 
+
+if ( returnOutput[-1] == '}' ){
+     returnOutput += ",\n"
+}
+returnOutput += """{
+name = "${target_group.name}" 
+backend_protocol = "${target_group.backend_protocol}" 
+backend_port = "${target_group.backend_port}" 
+target_type = "${target_group.target_type}" 
+deregistration_delay = "${target_group.deregistration_delay}" 
+health_check = {
+healthy_threshold = ${target_group.health_check.healthy_threshold}
+interval = ${target_group.health_check.interval} 
+port = "${target_group.health_check.port}" 
+protocol = "${target_group.health_check.protocol}" 
+unhealthy_threshold = ${target_group.health_check.unhealthy_threshold}
+}}"""
+}  // json.each
+
+returnOutput += "]"
+return returnOutput   
+}
+}
+
+def secgroup_restrict_create (src) {
+
+    def secgroup_restrict = ["fds-default-compute-secgroup", "fds-default-additional-secgroup"]
+
+    secgroup_restrict += src
+
+    List secgroup_restrict_list = secgroup_restrict.collect{'"' + it + '"'}
+
+    return secgroup_restrict_list.toString()
+
+}
+
+def lb_name_create (lbn) {
+ 
+    lbn=lbn.replaceAll("_","-")                              
+    return lbn
+
+}
+
+
+//json paramter sanitary check functions
+def paramCheck_asg_lb(parameterCheck) {
+  def entries = ""
+  def valid_keys_lb = ["build_type", "build_access", "runtime_data", "desired_capacity", "max_size", "min_size", "vm_type", "scaleset_prefix", "target_groups", "image_name", "rolling_upgrade_policy", "http_tcp_listeners", "user_defined_sg_ingress", "health_check_grace_period", "proximity_placement_group_names", "placement_group_names", "ebs_volume_type", "ebs_volume_size", "ebs_volume_iops", "ebs_volume_throughput", "ebs_type", "ebs_size", "ebs_iops", "ebs_throughput", "secgroup_restrict", "alerting_thresholds", "min_healthy_percentage", "instance_warmup", "suspended_processes", "heartbeat_timeout"]
+  for (entry in parameterCheck) {
+      if ( ! valid_keys_lb.contains (entry)  ) {
+          entries += entry + " "
+          print "Unknown key(s): ${entries}"
+          print "Resource: scale_set_with_load_balancer"
+          throw new RuntimeException("JSON contains unexpected key(s). See 'Unknown key(s)' output in console")
+      }
+  }
+}
+
+def paramCheck_asg_alb(parameterCheck) {
+  def entries = ""
+  def valid_keys_lb = ["build_type", "build_access", "runtime_data", "desired_capacity", "max_size", "min_size", "vm_type", "scaleset_prefix", "target_groups", "image_name", "rolling_upgrade_policy", "http_tcp_listeners", "user_defined_sg_ingress", "health_check_grace_period", "proximity_placement_group_names", "placement_group_names", "ebs_volume_type", "ebs_volume_size", "ebs_volume_iops", "ebs_volume_throughput", "ebs_type", "ebs_size", "ebs_iops", "ebs_throughput", "secgroup_restrict", "alerting_thresholds", "min_healthy_percentage", "instance_warmup", "suspended_processes", "heartbeat_timeout"]
+  for (entry in parameterCheck) {
+      if (! valid_keys_lb.contains (entry)) {
+          entries += entry + " "
+          print "Unknown key(s): ${entries}"
+          print "Resource: scale_set_with_application_load_balancer"
+          throw new RuntimeException("JSON contains unexpected key(s). See 'Unknown key(s)' output in console")
+      }
+    }
+}
+
+def paramCheck_asg(parameterCheck) {
+  def entries = ""
+  def valid_keys = ["build_type", "build_access", "runtime_data", "desired_capacity", "max_size", "min_size", "vm_type", "scaleset_prefix", "user_defined_sg_ingress", "image_name", "proximity_placement_group_name", "placement_group_name", "proximity_placement_group_names", "placement_group_names", "ebs_volume_type", "ebs_volume_size", "ebs_volume_iops", "ebs_volume_throughput", "ebs_type", "ebs_size", "ebs_iops", "ebs_throughput", "alerting_thresholds", "min_healthy_percentage", "instance_warmup", "heartbeat_timeout", "suspended_processes", "health_check_grace_period"]
+  for (entry in parameterCheck) {
+      if ( ! valid_keys.contains (entry)  ) {
+          entries += entry + " "
+          print "Unknown key(s): ${entries}"
+          print "Resource: scale_set_without_load_balancer"
+          throw new RuntimeException("JSON contains unexpected key(s). See 'Unknown key(s)' output in console")
+      }
+  }
+}
+
+def paramCheck_asg_shd_lb(parameterCheck) {
+  def entries = ""
+  def valid_keys_asg_shd_lb = ["build_type", "build_access", "runtime_data", "desired_capacity", "max_size", "min_size", "vm_type", "scaleset_prefix", "target_group_names", "image_name", "rolling_upgrade_policy", "health_check_grace_period", "proximity_placement_group_names", "placement_group_names", "ebs_volume_type", "ebs_volume_size", "ebs_volume_iops", "ebs_volume_throughput", "ebs_type", "ebs_size", "ebs_iops", "ebs_throughput", "alerting_thresholds", "min_healthy_percentage", "instance_warmup", "heartbeat_timeout", "suspended_processes"]
+  for (entry in parameterCheck) {
+      if ( ! valid_keys_asg_shd_lb.contains (entry)  ) {
+          entries += entry + " "
+          print "Unknown key(s): ${entries}"
+          print "Resource: scale_set_with_shared_load_balancer"
+          throw new RuntimeException("JSON contains unexpected key(s). See 'Unknown key(s)' output in console")
+      }
+  }
+}
+
+def paramCheck_shd_lb(parameterCheck) {
+  def entries = ""
+  def valid_keys_shd_lb = ["target_groups", "http_tcp_listeners", "user_defined_sg_ingress", "proximity_placement_group_names", "alerting_thresholds"]
+  for (entry in parameterCheck) {
+      if ( ! valid_keys_shd_lb.contains (entry)  ) {
+          entries += entry + " "
+          print "Unknown key(s): ${entries}"
+          print "Resource: scale_set_with_shared_load_balancer"
+          throw new RuntimeException("JSON contains unexpected key(s). See 'Unknown key(s)' output in console")
+      }
+  }
+}
+
+def paramCheck_ec2(parameterCheck) {
+  def entries = ""
+  for (entry in parameterCheck) {
+      if (entry != "build_type" && entry != "build_access" && entry != "runtime_data" && entry != "vm_count" && entry != "vm_type") {
+          entries += entry + " "
+          print "Unknown key(s): ${entries}"
+          print "Resource: virtual_machine"
+          throw new RuntimeException("JSON contains unexpected key(s). See 'Unknown key(s)' output in console")
+      }
+  }
+}
+
+def paramCheck_security_group(parameterCheck) {
+  def entries = ""
+  for (entry in parameterCheck) {
+      if (entry != "build_type" && entry != "build_access" && entry != "sg_rules") {
+          entries += entry + " "
+          print "Unknown key(s): ${entries}"
+          print "Resource: security_group"
+          throw new RuntimeException("JSON contains unexpected key(s). See 'Unknown key(s)' output in console")
+      }
+  }
+}
+
+def pgPrefixListBldr (value=["pga","pgb","pgc"],role_account_env,pgMap) {
+
+    def pgprefixlbStr = ""
+    
+    if (value instanceof List) {
+    
+    def pgMapjson = new JsonSlurper().parseText( pgMap )    
+    def pgTranList = []
+
+    value.each { k ->
+      pgTranList.add(pgMapjson[k])
+    }
+
+      pgTranList.each { v ->
+          v = v.take(3).drop(2).toLowerCase()
+          v = "\"sbu-content-" + role_account_env + "-compute-" + v + "-1\","
+          pgprefixlbStr += v
+      }
+      pgprefixlbStr = "[" + pgprefixlbStr.substring(0, pgprefixlbStr.length()-1) + "]"
+
+    } else {
+
+       value = value.take(3).drop(2).toLowerCase()
+       pgprefixlbStr = "[\"sbu-content-" + role_account_env + "-compute-" + value + "-1\"]"
+    }
+
+    return pgprefixlbStr
+}

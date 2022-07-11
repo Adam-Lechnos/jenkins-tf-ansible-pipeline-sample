@@ -1,0 +1,370 @@
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurperClassic
+
+def userInputOptionType
+def userApprovalTimeOut = false
+
+def userInputWorkspaceTypeFn() {
+  return input(message: 'Workspace', id: 'workspace', parameters: [ [$class: 'ChoiceParameterDefinition', choices: ['Existing', 'New'], description: '', name: 'choice'] ])
+}
+
+def userInputExistingWorkspace(workspace_name) {
+  return input(message: 'Workspace', id: 'workspace', parameters: [ [$class: 'ChoiceParameterDefinition', choices: "$workspace_name", description: '', name: 'choice'] ])
+}
+
+def userInputAddWorkspace() {
+  return input(message: 'Workspace', id: 'workspace', parameters: [ [$class: 'TextParameterDefinition', defaultValue: '', description: 'Workspace name for eg. user_name_primary_job', name: 'workspace_name'] ])
+}
+
+def existingWorkspace(inputWorkspace) {
+  sh label: 'Terraform workspace select', script: 'export TF_VAR_aws_region='+aws_region+'; terragrunt workspace select '+inputWorkspace+''
+  def workspace_resource_detailed_json = sh (label: 'Terraform State Pull', script: 'export TF_VAR_aws_region='+aws_region+'; terragrunt state pull', returnStdout: true).trim()
+  echo "${workspace_resource_detailed_json}"
+  workspace_resource_detailed_json = new JsonSlurperClassic().parseText(workspace_resource_detailed_json)
+  if (workspace_resource_detailed_json.outputs.size() > 0) {
+    sh label: 'Terraform summary', script: 'export TF_VAR_aws_region='+aws_region+'; terragrunt output'
+  }
+}
+
+def newWorkspace(inputWorkspace) {
+  sh label: 'Terraform workspace new', script: 'export TF_VAR_aws_region='+aws_region+'; terragrunt workspace new '+inputWorkspace+''
+}
+
+
+dirMap = [
+        'scale_set_without_load_balancer': 'aws/downstream/asg/',
+        'scale_set_with_load_balancer': 'aws/downstream/asg-lb/',
+        'scale_set_with_shared_load_balancer': 'aws/downstream/asg-shd-lb/',
+        'shared_load_balancer': 'aws/downstream/shd-lb/',
+        'security_group' : 'aws/downstream/security_group/'
+]
+
+dirLoc = dirMap[resource]
+
+def controllerDir = "aws/controller/"
+
+pipeline {
+  agent { label 'jenkins_managed_linux' }
+  environment {
+    PATH = "./../../../:$PATH"
+    GIT_ACCESS_TOKEN = credentials('devops_github_access_token')
+  }
+    parameters {
+    string(name: 'regression_tests', defaultValue: 'No', description: 'Should regression testing for the downstream job be enabled post build?')
+    string(name: 'devops_release', defaultValue: '', description: 'AWS Rolling Updates Mininum Healthy Percentage for all ASG based resources')
+    string(name: 'min_healthy_percentage', defaultValue: '50', description: 'AWS Rolling Updates Mininum Healthy Percentage for all ASG based resources')
+    string(name: 'health_check_grace_period', defaultValue: '60', description: 'Health Check Grace Period for all ASG based resources')
+    string(name: 'instance_warmup', defaultValue: '180', description: 'AWS Rolling Updates Instance Warmup for all ASG based resources')
+    string(name: 'heartbeat_timeout', defaultValue: '30', description: 'AWS Rolling Updates for Lifecycle Hook for Heartbeat Timeout for all ASG based resources')
+    string(name: 'aws_region', defaultValue: '', description: 'AWS region for all resources')
+    string(name: 'alerting_thresholds', defaultValue: '', description: 'Monster alerting thresholds for all ec2 based resources')
+    string(name: 'username', defaultValue: '', description: 'Username for all ec2 based resources')
+    string(name: 'sg_subs', defaultValue: '["fds-default-compute-secgroup", "fds-default-additional-secgroup"]', description: 'Securtiy Group List for ASG_SHD_LB resource')
+    string(name: 'lb_name', defaultValue: '', description: 'LB name for SHD_LB resource')
+    string(name: 'accountName', defaultValue: '', description: 'Account name for all resources')
+    string(name: 'build_type', defaultValue: '', description: 'Build Type for all resources')
+    string(name: 'build_access_set', defaultValue: 'non-admin', description: 'Build Type for all resources')
+    string(name: 'resource', defaultValue: '', description: 'Resource Name for all resources')
+    string(name: 'runtime_data', defaultValue: '', description: 'Runtime data for ASG-LB based resources')
+    string(name: 'scaleset_prefix', defaultValue: '', description: 'ASG Prefix for ASG based resources')
+    string(name: 'image_name', defaultValue: '', description: 'Image name for all resources except Security Group')
+    string(name: 'image_version', defaultValue: '', description: 'Image version for all resources except Security Group')
+    string(name: 'vm_count', defaultValue: '0', description: 'Number of instances in ASG for ASG based resources')
+    string(name: 'max_size', defaultValue: '0', description: 'Max number of instances in ASG for ASG based resources')
+    string(name: 'min_size', defaultValue: '0', description: 'Min number of instances in ASG for ASG based resources')
+    string(name: 'vm_type', defaultValue: '', description: 'VM Type for all resources except Security Group')
+    text(defaultValue: '''[{
+      name                 = "broker-in"
+      backend_protocol     = "tcp"
+      backend_port         = "7363"
+      target_type          = "instance"
+      deregistration_delay = "180"
+      health_check = {
+        healthy_threshold   = 3
+        interval            = 30
+        port                = "traffic-port"
+        protocol            = "TCP"
+        unhealthy_threshold = 3
+      }
+      },
+      {
+        name                 = "record-manager-out"
+        backend_protocol     = "tcp"
+        backend_port         = "7328"
+        target_type          = "instance"
+        deregistration_delay = "180"
+        health_check = {
+          healthy_threshold   = 3
+          interval            = 30
+          port                = "traffic-port"
+          protocol            = "TCP"
+          unhealthy_threshold = 3
+        }
+      },
+      {
+      name                 = "web-server"
+      backend_protocol     = "tcp"
+      backend_port         = "80"
+      target_type          = "instance"
+      deregistration_delay = "180"
+      health_check = {
+        healthy_threshold   = 3
+        interval            = 30
+        port                = "22"
+        protocol            = "TCP"
+        unhealthy_threshold = 3
+      }
+    }]''', description: 'A list of maps containing key/value pairs that define the target groups for LB based resouces.', name: 'target_groups')
+    text(defaultValue: '''[{
+      port     = 7363
+      protocol = "TCP"
+      },
+      {
+        port     = 7328
+        protocol = "TCP"
+      },
+      {
+        port     = 80
+        protocol = "TCP"
+    }]''', description: 'A list of maps describing the HTTP listeners or TCP ports for this LB based resources.', name: 'http_tcp_listeners')
+    text(defaultValue: '''{
+      "fds:BusinessUnit"     = "Content Engineering"
+      "fds:InfraEnvironment" = "dev"
+      "fds:InfraOwner"       = "quotes_engineer@factset.com"
+      "fds:Provisioner"      = "terraform"
+      "fds:TaggingVersion"   = "1.0"
+    }''', description: 'Scale set tags', name: 'vmss_tags')
+    text(defaultValue: '''{
+      "MinInstancesInService" : "1",
+      "MaxBatchSize" : "1",
+      "PauseTime" : "PT0S",
+      "SuspendProcesses" : [
+        "HealthCheck",
+        "ReplaceUnhealthy",
+        "AZRebalance",
+        "AlarmNotification",
+        "ScheduledActions",
+      ]
+    }''', description: 'Rolling upgrade policy paramaters for ASG based resouces', name: 'rolling_upgrade_policy')
+    text(defaultValue: '''[{
+      device_name = "/dev/sda1"
+      ebs = {
+        volume_size           = "50"
+        volume_type           = "gp2"
+        encrypted             = "false"
+        delete_on_termination = "true"
+      }
+    }]''', description: 'Customize details about the root block device of the instance for all resources except Security Group', name: 'block_device_mappings')
+    text(defaultValue: '''[{
+      description = "web-server"
+      protocol    = "tcp"
+      from_port   = "80"
+      to_port     = "80"
+      self        = false
+      cidr_blocks = "10.0.0.0/8"
+    }]''', description: 'A list of maps containing Security Group rules for the Security Group resourcer', name: 'sg_rules')
+    text(defaultValue: '[]', description: 'AWS Rolling Updates Suspended Processes for all ASG based resources', name: 'suspended_processes')
+    text(defaultValue: '''[]''', description: 'User defined security groups for LB based resources', name: 'user_defined_sg_ingress')
+    text(name: 'proximity_placement_group_name', defaultValue: '', description: 'Destination Proximity Placement Groups for ASG and LB based resources.')
+    text(name: 'pg_prefix', defaultValue: '["sbu-content-dev-compute-a-1", "sbu-content-dev-compute-b-1", "sbu-content-dev-compute-c-1"]', description: 'placement group prefix for ASG and LB based resources')
+    text(name: 'target_group_sub', defaultValue: '["target-group-a", "target-group-b"]', description: 'target group names for SHD-LB based resources')
+    string(name: 'interactive_mode', defaultValue: 'on', description: 'set interactive mode')
+    text(name: 'secgroup_restrict', defaultValue: '["fds-default-compute-secgroup", "fds-default-additional-secgroup"]', description: 'Security Group Traffic Restrictions for ASG with LB')
+    string(name: 'param_workspace_name', defaultValue: 'default', description: 'Terraform Workspace Name for all resources')
+    string(name: 'git_repo', defaultValue: 'default', description: 'Source Git Repo referenced for all resources')
+  }
+        
+  stages {
+
+    stage ('Binary Init') {
+      steps {
+       script {
+           print "========================\nDevops Release: " + devops_release + "\n========================"
+           terraformVer = sh(label: 'cURL Binaries Map - Terraform Version', script: 'set +x; curl -s -H "Authorization: token $GIT_ACCESS_TOKEN" https://raw.github.factset.com/market-data-cloud/account_config/master/pipeline_files/binary_versions | jq -r \'.base_binaries | to_entries | map(select(.key | match(\"terraform\"))) | map(.value) | .[]\'', returnStdout: true).trim()          
+           terragruntVer = sh(label: 'cURL Binaries Map - Terragrunt Version', script: 'set +x; curl -s -H "Authorization: token $GIT_ACCESS_TOKEN" https://raw.github.factset.com/market-data-cloud/account_config/master/pipeline_files/binary_versions | jq -r \'.base_binaries | to_entries | map(select(.key | match(\"terragrunt\"))) | map(.value) | .[]\'', returnStdout: true).trim()        
+           sh label: 'cURL binary-init script', script: 'set +x; curl -s -H "Authorization: token $GIT_ACCESS_TOKEN" https://raw.github.factset.com/market-data-cloud/devops_tools/master/binary-init/binary-init.sh --output binary-init.sh; chmod +x binary-init.sh'
+           sh label: 'Executing binary-init script', script: "./binary-init.sh ${terraformVer} ${terragruntVer}"
+       }
+      }
+    }
+    
+
+    stage ('Aqcuire Access & Set State') {
+      steps {
+       script {
+           role_account = sh(label: 'cURL AWS Account Map - role account', script: 'set +x; curl -s -H "Authorization: token $GIT_ACCESS_TOKEN" https://raw.github.factset.com/market-data-cloud/account_config/master/pipeline_files/aws_reference_maps | jq -r \'.account_map | to_entries | map(select(.key | match(\"'+params.accountName+'\"))) | map(.value) | .[]\'', returnStdout: true).trim()
+           echo "==========================\nAWS Account\n${params.accountName}\n${role_account}\n=========================="         
+           role = "arn:aws:iam::$role_account:role/jenkins_infra_builder"
+           accountEnv = sh(script: 'echo '+params.accountName+' | cut -d. -f3', returnStdout: true)
+       }
+      }
+    }
+    
+    stage('Create Terraform TFVar') {
+      steps {
+        withAWS(roleAccount: "$role_account", role: "$role" ) {
+        script {
+          def image_name_cut = sh(label: 'Creating trimmed image name var', returnStdout: true, script: 'echo '+params.image_name+' | cut -d"." -f1 | sed "s/_/-/g"').trim()
+          //echo "${image_name_cut}"
+          def image_version_cut = sh(label: 'Creating trimmed image version var', returnStdout: true, script: 'echo '+params.image_version+' | sed "s/\\./-/g"').trim()
+          //echo "${image_version_cut}"
+          def param_workspace_name_cut = sh(label: 'Creating trimmed param workspace name var', returnStdout: true, script: 'echo '+params.param_workspace_name+' | sed "s/_/-/g"').trim()
+          //echo "${param_workspace_name_cut}"
+          def scaleset_prefix_cut = sh(label: 'Creating trimmed scale set prefix var', returnStdout: true, script: 'echo '+params.scaleset_prefix+' | sed "s/_/-/g"').trim()
+          //echo "${scaleset_prefix_cut}"
+          def file_content = ""
+          for (entry in params) {
+            if (entry.key != "vmss_tags" && entry.key != "sg_rules" && entry.key != "target_groups" && entry.key != "target_group_sub" && entry.key != "http_tcp_listeners" && entry.key != "rolling_upgrade_policy" && entry.key != "user_defined_sg_ingress" && entry.key != "block_device_mappings" && entry.key != "pg_prefix" && entry.key != "interactive_mode" && entry.key != "secgroup_restrict" && entry.key != "sg_subs" && entry.key != "lb_name" && entry.key != "suspended_processes" && entry.key != "regression_tests" && entry.key != "devops_release") {
+              file_content += entry.key + " = \"" + entry.value + "\"\n"
+            }
+          }
+          file_content += 'image_name_trimmed' + " = \""  + image_name_cut + "\"\n"
+          file_content += 'image_version_trimmed' + " = \""  + image_version_cut + "\"\n"
+          file_content += 'param_workspace_name_trimmed' + " = \""  + param_workspace_name_cut + "\"\n"
+          file_content += 'scaleset_prefix_trimmed' + " = \""  + scaleset_prefix_cut + "\"\n"
+          echo "--------------------------------------------\nDownstream variables from upsteam controller\n--------------------------------------------"
+          echo "pg_prefix = ${params.pg_prefix}"
+          echo "block_device_mappings = ${params.block_device_mappings}"
+          echo "sg_rules = ${sg_rules}"
+          echo "target_group_sub = ${params.target_group_sub}"
+          echo "secgroup_restrict = ${params.secgroup_restrict}"
+          echo "lb_name = ${params.lb_name}"
+          echo "regression_tests = ${params.regression_tests}"
+          echo "environment = ${accountEnv}"
+          echo "--------------------------------------------\nStart terraform.tfvars File\n--------------------------------------------"
+          echo "${file_content}"
+          echo "--------------------------------------------\nEnd terraform.tfvars File\n--------------------------------------------"
+          writeFile file: 'terraform.tfvars', text: file_content
+        }
+      }
+      }
+    }
+    
+    stage('Set Terraform Workspace') {
+      steps {
+        withAWS(roleAccount: "$role_account", role: "$role" ) {
+        dir(dirLoc) {
+          script {
+            sh label: 'Terraform initialization', script: 'export TF_VAR_aws_region='+aws_region+'; terragrunt init -upgrade'
+            def workspace_name = sh (label: 'Terraform workspace listing', script: 'export TF_VAR_aws_region='+aws_region+'; terragrunt workspace list | egrep -v "placement_group_|account_details_|packer_aws_image_|terragrunt_resource_|security_group_" | tr -d "\\*"', returnStdout: true).trim()
+           
+              def present = false
+              workspace_name.split('\n').any { workspace ->
+                if (param_workspace_name == workspace.trim()) {
+                  present = true
+                  return true // break
+                }
+              }
+              if (present) {
+                existingWorkspace(param_workspace_name)
+              } else {
+                newWorkspace(param_workspace_name)
+              }   
+         
+        }
+       }
+      }
+     }      
+    }
+    
+    stage('Apply Terraform Change') {
+      steps {
+        withAWS(roleAccount: "$role_account", role: "$role" ) {
+        dir(dirLoc) {
+          script {
+
+          sh label: 'Terraform initialization', script: 'export TF_VAR_aws_region='+aws_region+'; terragrunt init -upgrade'
+          
+           switch (resource) {
+
+            case ~/scale_set_without_load_balancer/:
+            echo "++++++++++++++++++++++++++++++++++"
+            echo "Terraform Deploy/Destroy"
+            echo "Cloud Resource: ${resource}"
+            echo "++++++++++++++++++++++++++++++++++"
+
+            if (build_type == "deploy") {
+              sh label: 'Terraform Deploy ASG', script: "export TF_VAR_aws_region=${aws_region}; terragrunt apply -var 'vmss_tags=${vmss_tags}' -var 'suspended_processes=${suspended_processes}' -var 'user_defined_sg_ingress=${user_defined_sg_ingress}' -var 'block_device_mappings=${block_device_mappings}' -var 'pg_prefix=${pg_prefix}' -var-file='../../../terraform.tfvars' -auto-approve"
+            } else if (build_type == "destroy") {
+              sh label: 'Terraform Destroy ASG', script: "export TF_VAR_aws_region=${aws_region}; terragrunt destroy -var 'vmss_tags=${vmss_tags}' -var 'suspended_processes=${suspended_processes}' -var 'user_defined_sg_ingress=${user_defined_sg_ingress}' -var 'block_device_mappings=${block_device_mappings}' -var 'pg_prefix=${pg_prefix}' -var-file='../../../terraform.tfvars' -auto-approve"
+            }
+            break
+
+            case ~/scale_set_with_load_balancer/:
+            echo "++++++++++++++++++++++++++++++++++"
+            echo "Cloud Resource: ${resource}"
+            echo "++++++++++++++++++++++++++++++++++"
+            if (build_type == "deploy") {
+              sh label: 'Terraform Deploy ASG-LB', script: "export TF_VAR_aws_region=${aws_region}; terragrunt apply -var 'target_groups=${target_groups}' -var 'vmss_tags=${vmss_tags}' -var 'http_tcp_listeners=${http_tcp_listeners}' -var 'suspended_processes=${suspended_processes}' -var 'user_defined_sg_ingress=${user_defined_sg_ingress}' -var 'block_device_mappings=${block_device_mappings}' -var 'pg_prefix=${pg_prefix}' -var 'sg_name=${secgroup_restrict}' -var-file='../../../terraform.tfvars' -auto-approve"
+            } else if (build_type == "destroy") {
+              sh label: 'Terraform Destroy ASG-LB', script: "export TF_VAR_aws_region=${aws_region}; terragrunt destroy -var 'target_groups=${target_groups}' -var 'vmss_tags=${vmss_tags}' -var 'http_tcp_listeners=${http_tcp_listeners}' -var 'suspended_processes=${suspended_processes}' -var 'user_defined_sg_ingress=${user_defined_sg_ingress}' -var 'block_device_mappings=${block_device_mappings}' -var 'pg_prefix=${pg_prefix}' -var-file='../../../terraform.tfvars' -auto-approve"
+            }
+            break
+
+            case ~/scale_set_with_shared_load_balancer/:
+            echo "++++++++++++++++++++++++++++++++++"
+            echo "Cloud Resource: ${resource}"
+            echo "++++++++++++++++++++++++++++++++++"
+            if (build_type == "deploy") {
+              sh label: 'Terraform Deploy ASG-SHD-LB', script: "export TF_VAR_aws_region=${aws_region}; terragrunt apply -var 'lb_tg_name=${target_group_sub}' -var 'sg_subs=${sg_subs}' -var 'vmss_tags=${vmss_tags}' -var 'suspended_processes=${suspended_processes}' -var 'block_device_mappings=${block_device_mappings}' -var 'pg_prefix=${pg_prefix}' -var-file='../../../terraform.tfvars' -auto-approve"
+            } else if (build_type == "destroy") {
+              sh label: 'Terraform Destroy ASG-SHD-LB', script: "export TF_VAR_aws_region=${aws_region}; terragrunt destroy -var 'lb_tg_name=${target_group_sub}' -var 'vmss_tags=${vmss_tags}' -var 'suspended_processes=${suspended_processes}' -var 'block_device_mappings=${block_device_mappings}' -var 'pg_prefix=${pg_prefix}' -var-file='../../../terraform.tfvars' -auto-approve"
+            }
+            break
+
+            case ~/shared_load_balancer/:
+            echo "++++++++++++++++++++++++++++++++++"
+            echo "Cloud Resource: ${resource}"
+            echo "++++++++++++++++++++++++++++++++++"
+            if (build_type == "deploy") {
+              sh label: 'Terraform Deploy SHD-LB', script: "export TF_VAR_aws_region=${aws_region}; terragrunt apply -var 'target_groups=${target_groups}' -var 'lb_name=${lb_name}' -var 'vmss_tags=${vmss_tags}' -var 'http_tcp_listeners=${http_tcp_listeners}' -var 'user_defined_sg_ingress=${user_defined_sg_ingress}' -var 'pg_prefix=${pg_prefix}' -var-file='../../../terraform.tfvars' -auto-approve"
+            } else if (build_type == "destroy") {
+              sh label: 'Terraform Destroy SHD-LB', script: "export TF_VAR_aws_region=${aws_region}; terragrunt destroy -var 'target_groups=${target_groups}' -var 'lb_name=${lb_name}' -var 'vmss_tags=${vmss_tags}' -var 'http_tcp_listeners=${http_tcp_listeners}' -var 'user_defined_sg_ingress=${user_defined_sg_ingress}' -var 'pg_prefix=${pg_prefix}' -var-file='../../../terraform.tfvars' -auto-approve"
+            }
+            break
+
+            case ~/security_group/:
+            echo "++++++++++++++++++++++++++++++++++"
+            echo "Cloud Resource: ${resource}"
+            echo "++++++++++++++++++++++++++++++++++"
+            if (build_type == "deploy") {
+              sh label: 'Terraform Deploy Security Group', script: "export TF_VAR_aws_region=${aws_region}; terragrunt apply -var 'sg_rules=${sg_rules}' -var-file='../../../terraform.tfvars' -auto-approve"
+            } else if (build_type == "destroy") {
+              sh label: 'Terraform Destroy Security Group', script: "export TF_VAR_aws_region=${aws_region}; terragrunt destroy -auto-approve"
+            }
+            break
+
+           }
+
+        }
+       }
+      }
+     }
+    }
+
+
+    stage('Regression Testing') {
+      steps {
+        withAWS(roleAccount: "$role_account", role: "$role" ) {
+          script { 
+            // against all ASG based cloud resources
+            if (params.regression_tests == 'Yes' && params.scaleset_prefix != "" && params.build_type == "deploy" && !(accountEnv =~ /prod/)) {
+              sh(label: 'cURL AWS Regresssion Test - ASG script', script: 'set +x; curl -s -H "Authorization: token $GIT_ACCESS_TOKEN" https://raw.github.factset.com/market-data-cloud/devops_tools/master/aws-regression-tests/aws-regression-tests-asg.py --output aws-regression-tests-asg.py', returnStdout: true).trim()
+              sh(label: 'Executing Regression Test - ASG script', script: 'python3 -u aws-regression-tests-asg.py '+params.scaleset_prefix+' '+params.aws_region+'')
+              } else {
+              print("Skipping regression tests, either 'No' was selected or not a valid resource or build type for regresssion testing")         
+              }
+             }
+            }
+           }      
+          }
+          
+  }
+
+  post { 
+    always { 
+      cleanWs()
+    }
+  }
+
+}

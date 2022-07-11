@@ -1,0 +1,5 @@
+.terraform
+crash.log
+.nfs*
+terraform_clean_backend.sh
+terraform_batch_destroy.sh
