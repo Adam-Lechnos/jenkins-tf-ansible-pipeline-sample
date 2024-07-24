@@ -1,6 +1,12 @@
 # jenkins-tf-ansible-pipeline
 Jenkins, Terraform, and Ansible pipeline design
 
+## Code Repo
+
+This Code Repo refers to the Terraform modules for each deployment type.
+
+## Wiki Repo
+
 Refer to this repo's [Wiki](https://github.com/Adam-Lechnos/jenkins-tf-ansible-pipeline/wiki)
 
 ## Fixes
